@@ -24,6 +24,7 @@ final class IosNotificationStackHooks {
     private static ViewGroup maskedStack;
     private static Method resetGroupBackground;
     private static long lastMaskLog;
+    private static long lastClipLog;
 
     private static final class RowPosition {
         final View view;
@@ -358,7 +359,7 @@ final class IosNotificationStackHooks {
         // mask by a hairline seam: at rest this leaves the strip empty, which is exactly what
         // nudging the upper card up by a few pixels did by hand. Where the cards already
         // overlap the extra strip was covered anyway, so nothing changes on screen.
-        float seam = 2f * group.getResources().getDisplayMetrics().density;
+        float seam = 12f * group.getResources().getDisplayMetrics().density;
         rows.sort(Comparator.comparingDouble(row -> row.top));
         for (int i = 1; i < rows.size(); i++) {
             RowPosition lower = rows.get(i);
@@ -561,6 +562,18 @@ final class IosNotificationStackHooks {
                 if (chain.getArgs().size() >= 2 && chain.getArgs().get(1) instanceof View) {
                     enforceUnstackedRow((View) chain.getArgs().get(1));
                     IosNotificationExitState.applyRow((View) chain.getArgs().get(1));
+                }
+                long clipNow = android.os.SystemClock.uptimeMillis();
+                if (clipNow - lastClipLog >= 2000 && chain.getArgs().size() >= 2
+                        && chain.getArgs().get(1) instanceof View) {
+                    String childName = chain.getArgs().get(1).getClass().getSimpleName();
+                    if (childName.contains("Row") || childName.contains("Header")) {
+                        lastClipLog = clipNow;
+                        ArrayList<Path> probe = STACK_MASKS.get((View) chain.getArgs().get(1));
+                        Xp.log("[IOSShade] drawChild " + childName
+                                + " sameStack=" + (chain.getThisObject() == maskedStack)
+                                + " masks=" + (probe == null ? -1 : probe.size()));
+                    }
                 }
                 if (chain.getThisObject() != maskedStack || chain.getArgs().size() < 2
                         || !(chain.getArgs().get(0) instanceof Canvas)
