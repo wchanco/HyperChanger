@@ -10,6 +10,7 @@ import android.view.ViewGroup;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -20,6 +21,8 @@ import btm.m.os4.systemuihook.hypermusiccover.Xp;
 /** Keeps focus/media cards expanded while retaining OEM stacking for ordinary notifications. */
 final class IosNotificationStackHooks {
     private static final WeakHashMap<View, ArrayList<Path>> STACK_MASKS = new WeakHashMap<>();
+    private static final WeakHashMap<View, Rect> STACK_CLIPS = new WeakHashMap<>();
+    private static final WeakHashMap<View, Rect> STACK_CLIP_SAVED = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> SYSTEM_EXPANSION = new WeakHashMap<>();
     private static ViewGroup maskedStack;
     private static Method resetGroupBackground;
@@ -33,14 +36,17 @@ final class IosNotificationStackHooks {
         final float right;
         final float bottom;
         final float radius;
+        final float scaleY;
 
-        RowPosition(View view, float left, float top, float right, float bottom, float radius) {
+        RowPosition(View view, float left, float top, float right, float bottom, float radius,
+                    float scaleY) {
             this.view = view;
             this.left = left;
             this.top = top;
             this.right = right;
             this.bottom = bottom;
             this.radius = radius;
+            this.scaleY = scaleY;
         }
     }
 
@@ -349,7 +355,7 @@ final class IosNotificationStackHooks {
                 float radius = ((Number) Xp.callMethod(child, "getBgRadius")).floatValue()
                         * Math.min(scaleX, scaleY);
                 rows.add(new RowPosition(child, left, top + clipTop * scaleY, left + child.getWidth() * scaleX,
-                        top + Math.max(0, bottom) * scaleY, radius));
+                        top + Math.max(0, bottom) * scaleY, radius, scaleY));
             } catch (Throwable ignored) {
                 // Leave unsupported OEM row variants untouched.
             }
@@ -361,6 +367,7 @@ final class IosNotificationStackHooks {
         // overlap the extra strip was covered anyway, so nothing changes on screen.
         float seam = 12f * group.getResources().getDisplayMetrics().density;
         rows.sort(Comparator.comparingDouble(row -> row.top));
+        LinkedHashMap<View, Float> bands = new LinkedHashMap<>();
         for (int i = 1; i < rows.size(); i++) {
             RowPosition lower = rows.get(i);
             for (int j = 0; j < i; j++) {
@@ -376,6 +383,30 @@ final class IosNotificationStackHooks {
                     STACK_MASKS.put(lower.view, masks);
                 }
                 masks.add(shape);
+                bands.merge(lower.view, upper.bottom + seam, (a, b) -> Math.max(a, b));
+            }
+        }
+        // A canvas clip only trims the recorded drawing. A row whose glass backdrop is
+        // composited by the OEM's blur pass still surfaces through the card in front of it, so
+        // clip the row in its own render space as well: the covered band is never rasterised
+        // and has nothing left to sample.
+        ArrayList<View> stale = new ArrayList<>();
+        for (View view : new ArrayList<>(STACK_CLIPS.keySet())) {
+            if (view == null || !bands.containsKey(view)) stale.add(view);
+        }
+        for (View view : stale) restoreRowClip(view);
+        if (!bands.isEmpty()) {
+            HashMap<View, RowPosition> positions = new HashMap<>();
+            for (RowPosition row : rows) positions.put(row.view, row);
+            for (Map.Entry<View, Float> entry : bands.entrySet()) {
+                RowPosition row = positions.get(entry.getKey());
+                if (row == null || row.scaleY <= 0f) continue;
+                int top = Math.round((entry.getValue() - row.top) / row.scaleY);
+                Rect original = STACK_CLIP_SAVED.get(row.view);
+                if (original != null) top = Math.max(top, original.top);
+                if (top <= 0) continue;
+                applyRowClip(row.view, new Rect(0, Math.min(top, row.view.getHeight()),
+                        row.view.getWidth(), row.view.getHeight()));
             }
         }
         long now = android.os.SystemClock.uptimeMillis();
@@ -383,17 +414,45 @@ final class IosNotificationStackHooks {
             lastMaskLog = now;
             StringBuilder geometry = new StringBuilder();
             for (RowPosition row : rows) {
-                geometry.append('[').append(Math.round(row.top)).append('~')
-                        .append(Math.round(row.bottom)).append(']');
+                ArrayList<Path> got = STACK_MASKS.get(row.view);
+                geometry.append('[').append(Integer.toHexString(System.identityHashCode(row.view)))
+                        .append(' ').append(Math.round(row.top)).append('~')
+                        .append(Math.round(row.bottom)).append(" m=")
+                        .append(got == null ? 0 : got.size())
+                        .append(" c=").append(STACK_CLIPS.containsKey(row.view) ? 1 : 0)
+                        .append(']');
             }
-            Xp.log("[IOSShade] stack rows=" + rows.size() + " masks=" + STACK_MASKS.size()
+            Xp.log("[IOSShade] stack=" + Integer.toHexString(System.identityHashCode(group))
+                    + " rows=" + rows.size() + " masks=" + STACK_MASKS.size()
                     + " seam=" + Math.round(seam) + " " + geometry);
+        }
+    }
+
+    private static void applyRowClip(View view, Rect rect) {
+        if (!STACK_CLIP_SAVED.containsKey(view)) {
+            Rect current = view.getClipBounds();
+            STACK_CLIP_SAVED.put(view, current == null ? null : new Rect(current));
+        }
+        Rect current = view.getClipBounds();
+        if (current != null && current.equals(rect)) return;
+        STACK_CLIPS.put(view, new Rect(rect));
+        view.setClipBounds(rect);
+    }
+
+    private static void restoreRowClip(View view) {
+        STACK_CLIPS.remove(view);
+        if (!STACK_CLIP_SAVED.containsKey(view)) return;
+        Rect original = STACK_CLIP_SAVED.remove(view);
+        try {
+            view.setClipBounds(original);
+        } catch (Throwable ignored) {
         }
     }
 
     static void restoreStackedRows() {
         maskedStack = null;
         STACK_MASKS.clear();
+        for (View view : new ArrayList<>(STACK_CLIPS.keySet())) restoreRowClip(view);
     }
 
     static void restoreExpandedRows(View stack) {
@@ -564,15 +623,16 @@ final class IosNotificationStackHooks {
                     IosNotificationExitState.applyRow((View) chain.getArgs().get(1));
                 }
                 long clipNow = android.os.SystemClock.uptimeMillis();
-                if (clipNow - lastClipLog >= 2000 && chain.getArgs().size() >= 2
+                if (chain.getThisObject() == maskedStack && chain.getArgs().size() >= 2
                         && chain.getArgs().get(1) instanceof View) {
-                    String childName = chain.getArgs().get(1).getClass().getSimpleName();
-                    if (childName.contains("Row") || childName.contains("Header")) {
+                    ArrayList<Path> probe = STACK_MASKS.get((View) chain.getArgs().get(1));
+                    if (probe != null && !probe.isEmpty() && clipNow - lastClipLog >= 2000) {
                         lastClipLog = clipNow;
-                        ArrayList<Path> probe = STACK_MASKS.get((View) chain.getArgs().get(1));
-                        Xp.log("[IOSShade] drawChild " + childName
-                                + " sameStack=" + (chain.getThisObject() == maskedStack)
-                                + " masks=" + (probe == null ? -1 : probe.size()));
+                        Xp.log("[IOSShade] clip stack="
+                                + Integer.toHexString(System.identityHashCode(chain.getThisObject()))
+                                + " child="
+                                + Integer.toHexString(System.identityHashCode(chain.getArgs().get(1)))
+                                + " masks=" + probe.size());
                     }
                 }
                 if (chain.getThisObject() != maskedStack || chain.getArgs().size() < 2
