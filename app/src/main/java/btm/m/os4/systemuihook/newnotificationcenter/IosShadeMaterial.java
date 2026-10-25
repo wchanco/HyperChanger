@@ -158,6 +158,15 @@ public final class IosShadeMaterial {
         return isPanel(view) || isDismissView(view) || isClock(view);
     }
 
+    /**
+     * A notification card. Its glass samples the views drawn below it inside this window, so
+     * the stacked card underneath shows through the one in front. Nothing in this class touches
+     * the lock-screen cards, which is why they never show the bleed.
+     */
+    private static boolean isRowSurface(View view) {
+        return view.getClass().getName().endsWith(".NotificationBackgroundView");
+    }
+
     private static boolean target(View view) {
         String name = view.getClass().getName();
         return isPanel(view) || name.endsWith(".NotificationBackgroundView")
@@ -219,7 +228,7 @@ public final class IosShadeMaterial {
                 // left the iOS shade with refraction only: a transparent glass with no blur at all.
                 // Fall back to the row radius whenever the native value is missing.
                 return radius > 0 ? radius : 80;
-            case 3: return false;
+            case 3: return isRowSurface(view); // Cards sample the window backdrop, not the card below.
             case 4: return false; // Include the wallpaper sibling below NotificationPanelView.
             default: throw new IllegalArgumentException();
         }
