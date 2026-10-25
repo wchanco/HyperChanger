@@ -21,15 +21,14 @@ import btm.m.os4.systemuihook.hypermusiccover.Xp;
 final class IosNotificationStackHooks {
     private static final WeakHashMap<View, ArrayList<Path>> STACK_MASKS = new WeakHashMap<>();
     /**
-     * Cards with nothing covering them, drawn a few pixels higher so the sliver their glass
-     * samples below the bottom edge lands on the wallpaper instead of the card behind. This is
-     * the same nudge that makes the bleed disappear when the card is moved by hand, and it
-     * clips nothing, so every card keeps its rounded top. The amount is read from
-     * {@link #LIFT_SETTING} at runtime so it can be dialled in without another build.
+     * Cards with nothing covering them, laid out a few pixels higher so the sliver their glass
+     * samples past the bottom edge lands on the wallpaper instead of the card behind. This has
+     * to move the view itself: the backdrop is sampled where the card is laid out, so a canvas
+     * translate shifts the pixels and leaves the sampling where it was.
      */
-    private static final WeakHashMap<View, Boolean> LIFTED_ROWS = new WeakHashMap<>();
+    private static final WeakHashMap<View, Float> LIFT_APPLIED = new WeakHashMap<>();
     private static final String LIFT_SETTING = "ios_shade_lift_px";
-    private static int liftPx = 24;
+    private static int liftPx;
     private static long liftCheckedAt;
     private static final WeakHashMap<View, Boolean> SYSTEM_EXPANSION = new WeakHashMap<>();
     private static ViewGroup maskedStack;
@@ -382,11 +381,9 @@ final class IosNotificationStackHooks {
             }
         }
         refreshLift(group);
-        LIFTED_ROWS.clear();
-        if (rows.size() >= 2) {
-            for (RowPosition row : rows) {
-                if (!STACK_MASKS.containsKey(row.view)) LIFTED_ROWS.put(row.view, Boolean.TRUE);
-            }
+        for (RowPosition row : rows) {
+            boolean front = rows.size() >= 2 && !STACK_MASKS.containsKey(row.view);
+            applyLift(row.view, front ? liftPx : 0f);
         }
     }
 
@@ -403,10 +400,32 @@ final class IosNotificationStackHooks {
         }
     }
 
+    /** Moves the card in layout space, undoing the previous delta first so it never drifts. */
+    private static void applyLift(View view, float delta) {
+        try {
+            Float applied = LIFT_APPLIED.get(view);
+            if (applied == null) applied = 0f;
+            if (Math.abs(delta - applied) < 0.5f) return;
+            float base = view.getTranslationY() + applied;
+            view.setTranslationY(base - delta);
+            LIFT_APPLIED.put(view, delta);
+        } catch (Throwable ignored) {
+        }
+    }
+
     static void restoreStackedRows() {
         maskedStack = null;
         STACK_MASKS.clear();
-        LIFTED_ROWS.clear();
+        for (Map.Entry<View, Float> entry : new ArrayList<>(LIFT_APPLIED.entrySet())) {
+            View view = entry.getKey();
+            Float applied = entry.getValue();
+            if (view == null || applied == null || applied == 0f) continue;
+            try {
+                view.setTranslationY(view.getTranslationY() + applied);
+            } catch (Throwable ignored) {
+            }
+        }
+        LIFT_APPLIED.clear();
     }
 
     static void restoreExpandedRows(View stack) {
@@ -579,17 +598,12 @@ final class IosNotificationStackHooks {
                 if (chain.getThisObject() != maskedStack || chain.getArgs().size() < 2
                         || !(chain.getArgs().get(0) instanceof Canvas)
                         || !(chain.getArgs().get(1) instanceof View)) return chain.proceed();
-                View drawn = (View) chain.getArgs().get(1);
-                ArrayList<Path> masks = STACK_MASKS.get(drawn);
-                boolean lifted = LIFTED_ROWS.containsKey(drawn);
-                if (!lifted && (masks == null || masks.isEmpty())) return chain.proceed();
+                ArrayList<Path> masks = STACK_MASKS.get((View) chain.getArgs().get(1));
+                if (masks == null || masks.isEmpty()) return chain.proceed();
                 Canvas canvas = (Canvas) chain.getArgs().get(0);
                 int save = canvas.save();
                 try {
-                    if (lifted && liftPx != 0) canvas.translate(0f, -liftPx);
-                    if (masks != null) {
-                        for (Path mask : masks) canvas.clipOutPath(mask);
-                    }
+                    for (Path mask : masks) canvas.clipOutPath(mask);
                     return chain.proceed();
                 } finally {
                     canvas.restoreToCount(save);
