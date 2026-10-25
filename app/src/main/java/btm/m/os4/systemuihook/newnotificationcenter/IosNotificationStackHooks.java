@@ -23,6 +23,7 @@ final class IosNotificationStackHooks {
     private static final WeakHashMap<View, Boolean> SYSTEM_EXPANSION = new WeakHashMap<>();
     private static ViewGroup maskedStack;
     private static Method resetGroupBackground;
+    private static long lastMaskLog;
 
     private static final class RowPosition {
         final View view;
@@ -352,15 +353,21 @@ final class IosNotificationStackHooks {
                 // Leave unsupported OEM row variants untouched.
             }
         }
+        // Soft glass samples a few pixels past its own edge, so two cards that merely touch
+        // still feed the lower card's top edge into the upper card's bottom band. Extend the
+        // mask by a hairline seam: at rest this leaves the strip empty, which is exactly what
+        // nudging the upper card up by a few pixels did by hand. Where the cards already
+        // overlap the extra strip was covered anyway, so nothing changes on screen.
+        float seam = 2f * group.getResources().getDisplayMetrics().density;
         rows.sort(Comparator.comparingDouble(row -> row.top));
         for (int i = 1; i < rows.size(); i++) {
             RowPosition lower = rows.get(i);
             for (int j = 0; j < i; j++) {
                 RowPosition upper = rows.get(j);
-                if (upper.bottom <= lower.top || upper.left >= lower.right
+                if (upper.bottom + seam <= lower.top || upper.left >= lower.right
                         || upper.right <= lower.left) continue;
                 Path shape = new Path();
-                shape.addRoundRect(upper.left, upper.top, upper.right, upper.bottom,
+                shape.addRoundRect(upper.left, upper.top, upper.right, upper.bottom + seam,
                         upper.radius, upper.radius, Path.Direction.CW);
                 ArrayList<Path> masks = STACK_MASKS.get(lower.view);
                 if (masks == null) {
@@ -369,6 +376,17 @@ final class IosNotificationStackHooks {
                 }
                 masks.add(shape);
             }
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastMaskLog >= 2000 && rows.size() >= 2) {
+            lastMaskLog = now;
+            StringBuilder geometry = new StringBuilder();
+            for (RowPosition row : rows) {
+                geometry.append('[').append(Math.round(row.top)).append('~')
+                        .append(Math.round(row.bottom)).append(']');
+            }
+            Xp.log("[IOSShade] stack rows=" + rows.size() + " masks=" + STACK_MASKS.size()
+                    + " seam=" + Math.round(seam) + " " + geometry);
         }
     }
 
