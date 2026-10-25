@@ -498,6 +498,17 @@ public final class IosNotificationCenterPresentation {
         if (isLandscapePanel()) {
             return Math.round(24f * view.getResources().getDisplayMetrics().density);
         }
+        // Bottom-anchoring is only meaningful while the whole deck fits above the inset. Once
+        // the list is taller than the viewport, the native scroll range is what carries the
+        // user to the last card; shifting the stack down here shrinks that range and leaves the
+        // bottom notification out of reach. Fall back to the untouched stack in that case, the
+        // same path the lock screen takes.
+        try {
+            float content = ((Number) Xp.getObjectField(view, "mContentHeight")).floatValue();
+            if (content > 0f && nativeStackY + content > viewportBottom(view)) return 0f;
+        } catch (Throwable ignored) {
+            // Unreadable content height: keep the historical behaviour.
+        }
         float reserve = IosNotificationStackHooks.restingRowsExtent(view);
         if (reserve <= 0f) reserve = 160f * panel.getResources().getDisplayMetrics().density;
         // Anchor the first full card and the OEM stack peeks above the bottom safe area.
