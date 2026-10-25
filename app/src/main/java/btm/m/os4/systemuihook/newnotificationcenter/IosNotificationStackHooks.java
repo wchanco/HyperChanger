@@ -10,6 +10,7 @@ import android.view.ViewGroup;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -20,16 +21,8 @@ import btm.m.os4.systemuihook.hypermusiccover.Xp;
 /** Keeps focus/media cards expanded while retaining OEM stacking for ordinary notifications. */
 final class IosNotificationStackHooks {
     private static final WeakHashMap<View, ArrayList<Path>> STACK_MASKS = new WeakHashMap<>();
-    /**
-     * Cards with nothing covering them, laid out a few pixels higher so the sliver their glass
-     * samples past the bottom edge lands on the wallpaper instead of the card behind. This has
-     * to move the view itself: the backdrop is sampled where the card is laid out, so a canvas
-     * translate shifts the pixels and leaves the sampling where it was.
-     */
-    private static final WeakHashMap<View, Float> LIFT_APPLIED = new WeakHashMap<>();
-    private static final String LIFT_SETTING = "ios_shade_lift_px";
-    private static int liftPx;
-    private static long liftCheckedAt;
+    private static final WeakHashMap<View, Rect> STACK_CLIPS = new WeakHashMap<>();
+    private static final WeakHashMap<View, Rect> STACK_CLIP_SAVED = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> SYSTEM_EXPANSION = new WeakHashMap<>();
     private static ViewGroup maskedStack;
     private static Method resetGroupBackground;
@@ -41,14 +34,17 @@ final class IosNotificationStackHooks {
         final float right;
         final float bottom;
         final float radius;
+        final float scaleY;
 
-        RowPosition(View view, float left, float top, float right, float bottom, float radius) {
+        RowPosition(View view, float left, float top, float right, float bottom, float radius,
+                    float scaleY) {
             this.view = view;
             this.left = left;
             this.top = top;
             this.right = right;
             this.bottom = bottom;
             this.radius = radius;
+            this.scaleY = scaleY;
         }
     }
 
@@ -334,7 +330,11 @@ final class IosNotificationStackHooks {
                     && !hasType(child, ".MiuiMediaHeaderView"))) continue;
             if (isFocusOrMediaNotification(child)) continue;
             try {
-                int height = ((Number) Xp.callMethod(child, "getActualHeight")).intValue();
+                int actual = ((Number) Xp.callMethod(child, "getActualHeight")).intValue();
+                // getActualHeight() carries the row's shadow padding. Masking by it left the
+                // covered band of the card behind visible by exactly that padding; the card
+                // itself is laid out at getHeight().
+                int height = child.getHeight() > 0 ? Math.min(actual, child.getHeight()) : actual;
                 float scaleX = ((Number) Xp.callMethod(child, "getSuperScaleX")).floatValue();
                 float scaleY = ((Number) Xp.callMethod(child, "getSuperScaleY")).floatValue();
                 float alpha = ((Number) Xp.callMethod(child, "getSuperAlpha")).floatValue();
@@ -357,12 +357,13 @@ final class IosNotificationStackHooks {
                 float radius = ((Number) Xp.callMethod(child, "getBgRadius")).floatValue()
                         * Math.min(scaleX, scaleY);
                 rows.add(new RowPosition(child, left, top + clipTop * scaleY, left + child.getWidth() * scaleX,
-                        top + Math.max(0, bottom) * scaleY, radius));
+                        top + Math.max(0, bottom) * scaleY, radius, scaleY));
             } catch (Throwable ignored) {
                 // Leave unsupported OEM row variants untouched.
             }
         }
         rows.sort(Comparator.comparingDouble(row -> row.top));
+        LinkedHashMap<View, Float> bands = new LinkedHashMap<>();
         for (int i = 1; i < rows.size(); i++) {
             RowPosition lower = rows.get(i);
             for (int j = 0; j < i; j++) {
@@ -378,37 +379,50 @@ final class IosNotificationStackHooks {
                     STACK_MASKS.put(lower.view, masks);
                 }
                 masks.add(shape);
+                bands.merge(lower.view, upper.bottom, (a, b) -> Math.max(a, b));
             }
         }
-        refreshLift(group);
-        for (RowPosition row : rows) {
-            boolean front = rows.size() >= 2 && !STACK_MASKS.containsKey(row.view);
-            applyLift(row.view, front ? liftPx : 0f);
+        // A canvas clip only trims the recorded drawing; the row's glass backdrop can still be
+        // composited from it. Clip the row in its own render space too, so the covered band is
+        // never rasterised at all.
+        ArrayList<View> stale = new ArrayList<>();
+        for (View view : new ArrayList<>(STACK_CLIPS.keySet())) {
+            if (view == null || !bands.containsKey(view)) stale.add(view);
+        }
+        for (View view : stale) restoreRowClip(view);
+        if (!bands.isEmpty()) {
+            HashMap<View, RowPosition> positions = new HashMap<>();
+            for (RowPosition row : rows) positions.put(row.view, row);
+            for (Map.Entry<View, Float> entry : bands.entrySet()) {
+                RowPosition row = positions.get(entry.getKey());
+                if (row == null || row.scaleY <= 0f) continue;
+                int top = Math.round((entry.getValue() - row.top) / row.scaleY);
+                Rect original = STACK_CLIP_SAVED.get(row.view);
+                if (original != null) top = Math.max(top, original.top);
+                if (top <= 0) continue;
+                applyRowClip(row.view, new Rect(0, Math.min(top, row.view.getHeight()),
+                        row.view.getWidth(), row.view.getHeight()));
+            }
         }
     }
 
-    /** Runtime-tunable lift, so the offset can be dialled in without another build. */
-    private static void refreshLift(View anchor) {
-        long now = android.os.SystemClock.uptimeMillis();
-        if (now - liftCheckedAt < 2000) return;
-        liftCheckedAt = now;
-        try {
-            liftPx = android.provider.Settings.System.getInt(
-                    anchor.getContext().getContentResolver(), LIFT_SETTING, liftPx);
-        } catch (Throwable ignored) {
-            // Keep the last known value when the setting is unreadable.
+    private static void applyRowClip(View view, Rect rect) {
+        if (!STACK_CLIP_SAVED.containsKey(view)) {
+            Rect current = view.getClipBounds();
+            STACK_CLIP_SAVED.put(view, current == null ? null : new Rect(current));
         }
+        Rect current = view.getClipBounds();
+        if (current != null && current.equals(rect)) return;
+        STACK_CLIPS.put(view, new Rect(rect));
+        view.setClipBounds(rect);
     }
 
-    /** Moves the card in layout space, undoing the previous delta first so it never drifts. */
-    private static void applyLift(View view, float delta) {
+    private static void restoreRowClip(View view) {
+        STACK_CLIPS.remove(view);
+        if (!STACK_CLIP_SAVED.containsKey(view)) return;
+        Rect original = STACK_CLIP_SAVED.remove(view);
         try {
-            Float applied = LIFT_APPLIED.get(view);
-            if (applied == null) applied = 0f;
-            if (Math.abs(delta - applied) < 0.5f) return;
-            float base = view.getTranslationY() + applied;
-            view.setTranslationY(base - delta);
-            LIFT_APPLIED.put(view, delta);
+            view.setClipBounds(original);
         } catch (Throwable ignored) {
         }
     }
@@ -416,16 +430,7 @@ final class IosNotificationStackHooks {
     static void restoreStackedRows() {
         maskedStack = null;
         STACK_MASKS.clear();
-        for (Map.Entry<View, Float> entry : new ArrayList<>(LIFT_APPLIED.entrySet())) {
-            View view = entry.getKey();
-            Float applied = entry.getValue();
-            if (view == null || applied == null || applied == 0f) continue;
-            try {
-                view.setTranslationY(view.getTranslationY() + applied);
-            } catch (Throwable ignored) {
-            }
-        }
-        LIFT_APPLIED.clear();
+        for (View view : new ArrayList<>(STACK_CLIPS.keySet())) restoreRowClip(view);
     }
 
     static void restoreExpandedRows(View stack) {
