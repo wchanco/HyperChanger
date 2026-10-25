@@ -28,6 +28,7 @@ final class IosNotificationStackHooks {
     private static Method resetGroupBackground;
     private static long lastMaskLog;
     private static long lastClipLog;
+    private static final boolean CLIP_ROWS = false;
 
     private static final class RowPosition {
         final View view;
@@ -37,9 +38,10 @@ final class IosNotificationStackHooks {
         final float bottom;
         final float radius;
         final float scaleY;
+        final String detail;
 
         RowPosition(View view, float left, float top, float right, float bottom, float radius,
-                    float scaleY) {
+                    float scaleY, String detail) {
             this.view = view;
             this.left = left;
             this.top = top;
@@ -47,6 +49,7 @@ final class IosNotificationStackHooks {
             this.bottom = bottom;
             this.radius = radius;
             this.scaleY = scaleY;
+            this.detail = detail;
         }
     }
 
@@ -347,15 +350,20 @@ final class IosNotificationStackHooks {
                 float left = child.getLeft()
                         + ((Number) Xp.callMethod(child, "getSuperTranslationX")).floatValue()
                         + child.getPivotX() * (1f - scaleX);
-                float top = child.getTop()
-                        + ((Number) Xp.callMethod(child, "getSuperTranslationY")).floatValue()
+                float superTy = ((Number) Xp.callMethod(child, "getSuperTranslationY")).floatValue();
+                float top = child.getTop() + superTy
                         + child.getPivotY() * (1f - scaleY);
                 int clipTop = ((Number) Xp.callMethod(child, "getClipTopAmount")).intValue();
                 if (bounds != null) clipTop = Math.max(clipTop, bounds.top);
                 float radius = ((Number) Xp.callMethod(child, "getBgRadius")).floatValue()
                         * Math.min(scaleX, scaleY);
+                String detail = "t=" + child.getTop() + " h=" + child.getHeight()
+                        + " ah=" + height + " ty=" + Math.round(child.getTranslationY())
+                        + " sty=" + Math.round(superTy) + " sy=" + scaleY
+                        + " pv=" + Math.round(child.getPivotY()) + " ct=" + clipTop
+                        + " cb=" + clipBottom + " eb=" + stackBottom;
                 rows.add(new RowPosition(child, left, top + clipTop * scaleY, left + child.getWidth() * scaleX,
-                        top + Math.max(0, bottom) * scaleY, radius, scaleY));
+                        top + Math.max(0, bottom) * scaleY, radius, scaleY, detail));
             } catch (Throwable ignored) {
                 // Leave unsupported OEM row variants untouched.
             }
@@ -392,7 +400,7 @@ final class IosNotificationStackHooks {
             if (view == null || !bands.containsKey(view)) stale.add(view);
         }
         for (View view : stale) restoreRowClip(view);
-        if (!bands.isEmpty()) {
+        if (CLIP_ROWS && !bands.isEmpty()) {
             HashMap<View, RowPosition> positions = new HashMap<>();
             for (RowPosition row : rows) positions.put(row.view, row);
             for (Map.Entry<View, Float> entry : bands.entrySet()) {
@@ -417,6 +425,7 @@ final class IosNotificationStackHooks {
                         .append(Math.round(row.bottom)).append(" m=")
                         .append(got == null ? 0 : got.size())
                         .append(" c=").append(STACK_CLIPS.containsKey(row.view) ? 1 : 0)
+                        .append(' ').append(row.detail)
                         .append(']');
             }
             Xp.log("[IOSShade] stack=" + Integer.toHexString(System.identityHashCode(group))
