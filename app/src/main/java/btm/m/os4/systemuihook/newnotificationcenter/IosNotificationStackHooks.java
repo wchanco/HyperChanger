@@ -20,9 +20,17 @@ import btm.m.os4.systemuihook.hypermusiccover.Xp;
 /** Keeps focus/media cards expanded while retaining OEM stacking for ordinary notifications. */
 final class IosNotificationStackHooks {
     private static final WeakHashMap<View, ArrayList<Path>> STACK_MASKS = new WeakHashMap<>();
-    /** Front cards drawn a few pixels higher so their glass edge samples the wallpaper. */
+    /**
+     * Cards with nothing covering them, drawn a few pixels higher so the sliver their glass
+     * samples below the bottom edge lands on the wallpaper instead of the card behind. This is
+     * the same nudge that makes the bleed disappear when the card is moved by hand, and it
+     * clips nothing, so every card keeps its rounded top. The amount is read from
+     * {@link #LIFT_SETTING} at runtime so it can be dialled in without another build.
+     */
     private static final WeakHashMap<View, Boolean> LIFTED_ROWS = new WeakHashMap<>();
-    private static final float FRONT_CARD_LIFT_DP = 2.5f;
+    private static final String LIFT_SETTING = "ios_shade_lift_px";
+    private static int liftPx = 24;
+    private static long liftCheckedAt;
     private static final WeakHashMap<View, Boolean> SYSTEM_EXPANSION = new WeakHashMap<>();
     private static ViewGroup maskedStack;
     private static Method resetGroupBackground;
@@ -373,15 +381,25 @@ final class IosNotificationStackHooks {
                 masks.add(shape);
             }
         }
-        // The card in front has nothing covering it. Draw it a couple of pixels higher so the
-        // sliver its glass samples past the bottom edge lands on the wallpaper instead of on
-        // the card behind. This is the same nudge that made the bleed go away by hand, and it
-        // clips nothing, so every card keeps its rounded top.
+        refreshLift(group);
         LIFTED_ROWS.clear();
         if (rows.size() >= 2) {
             for (RowPosition row : rows) {
                 if (!STACK_MASKS.containsKey(row.view)) LIFTED_ROWS.put(row.view, Boolean.TRUE);
             }
+        }
+    }
+
+    /** Runtime-tunable lift, so the offset can be dialled in without another build. */
+    private static void refreshLift(View anchor) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - liftCheckedAt < 2000) return;
+        liftCheckedAt = now;
+        try {
+            liftPx = android.provider.Settings.System.getInt(
+                    anchor.getContext().getContentResolver(), LIFT_SETTING, liftPx);
+        } catch (Throwable ignored) {
+            // Keep the last known value when the setting is unreadable.
         }
     }
 
@@ -561,15 +579,14 @@ final class IosNotificationStackHooks {
                 if (chain.getThisObject() != maskedStack || chain.getArgs().size() < 2
                         || !(chain.getArgs().get(0) instanceof Canvas)
                         || !(chain.getArgs().get(1) instanceof View)) return chain.proceed();
-                View child = (View) chain.getArgs().get(1);
-                ArrayList<Path> masks = STACK_MASKS.get(child);
-                boolean lift = LIFTED_ROWS.containsKey(child);
-                if (!lift && (masks == null || masks.isEmpty())) return chain.proceed();
+                View drawn = (View) chain.getArgs().get(1);
+                ArrayList<Path> masks = STACK_MASKS.get(drawn);
+                boolean lifted = LIFTED_ROWS.containsKey(drawn);
+                if (!lifted && (masks == null || masks.isEmpty())) return chain.proceed();
                 Canvas canvas = (Canvas) chain.getArgs().get(0);
                 int save = canvas.save();
                 try {
-                    if (lift) canvas.translate(0f, -FRONT_CARD_LIFT_DP
-                            * child.getResources().getDisplayMetrics().density);
+                    if (lifted && liftPx != 0) canvas.translate(0f, -liftPx);
                     if (masks != null) {
                         for (Path mask : masks) canvas.clipOutPath(mask);
                     }
