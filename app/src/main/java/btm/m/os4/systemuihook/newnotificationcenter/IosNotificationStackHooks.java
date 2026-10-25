@@ -10,7 +10,6 @@ import android.view.ViewGroup;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -21,14 +20,12 @@ import btm.m.os4.systemuihook.hypermusiccover.Xp;
 /** Keeps focus/media cards expanded while retaining OEM stacking for ordinary notifications. */
 final class IosNotificationStackHooks {
     private static final WeakHashMap<View, ArrayList<Path>> STACK_MASKS = new WeakHashMap<>();
-    private static final WeakHashMap<View, Rect> STACK_CLIPS = new WeakHashMap<>();
-    private static final WeakHashMap<View, Rect> STACK_CLIP_SAVED = new WeakHashMap<>();
+    /** Front cards drawn a few pixels higher so their glass edge samples the wallpaper. */
+    private static final WeakHashMap<View, Boolean> LIFTED_ROWS = new WeakHashMap<>();
+    private static final float FRONT_CARD_LIFT_DP = 2.5f;
     private static final WeakHashMap<View, Boolean> SYSTEM_EXPANSION = new WeakHashMap<>();
     private static ViewGroup maskedStack;
     private static Method resetGroupBackground;
-    private static long lastMaskLog;
-    private static long lastClipLog;
-    private static final boolean CLIP_ROWS = false;
 
     private static final class RowPosition {
         final View view;
@@ -37,19 +34,14 @@ final class IosNotificationStackHooks {
         final float right;
         final float bottom;
         final float radius;
-        final float scaleY;
-        final String detail;
 
-        RowPosition(View view, float left, float top, float right, float bottom, float radius,
-                    float scaleY, String detail) {
+        RowPosition(View view, float left, float top, float right, float bottom, float radius) {
             this.view = view;
             this.left = left;
             this.top = top;
             this.right = right;
             this.bottom = bottom;
             this.radius = radius;
-            this.scaleY = scaleY;
-            this.detail = detail;
         }
     }
 
@@ -350,39 +342,28 @@ final class IosNotificationStackHooks {
                 float left = child.getLeft()
                         + ((Number) Xp.callMethod(child, "getSuperTranslationX")).floatValue()
                         + child.getPivotX() * (1f - scaleX);
-                float superTy = ((Number) Xp.callMethod(child, "getSuperTranslationY")).floatValue();
-                float top = child.getTop() + superTy
+                float top = child.getTop()
+                        + ((Number) Xp.callMethod(child, "getSuperTranslationY")).floatValue()
                         + child.getPivotY() * (1f - scaleY);
                 int clipTop = ((Number) Xp.callMethod(child, "getClipTopAmount")).intValue();
                 if (bounds != null) clipTop = Math.max(clipTop, bounds.top);
                 float radius = ((Number) Xp.callMethod(child, "getBgRadius")).floatValue()
                         * Math.min(scaleX, scaleY);
-                String detail = "t=" + child.getTop() + " h=" + child.getHeight()
-                        + " ah=" + height + " ty=" + Math.round(child.getTranslationY())
-                        + " sty=" + Math.round(superTy) + " sy=" + scaleY
-                        + " pv=" + Math.round(child.getPivotY()) + " ct=" + clipTop
-                        + " cb=" + clipBottom + " eb=" + stackBottom;
                 rows.add(new RowPosition(child, left, top + clipTop * scaleY, left + child.getWidth() * scaleX,
-                        top + Math.max(0, bottom) * scaleY, radius, scaleY, detail));
+                        top + Math.max(0, bottom) * scaleY, radius));
             } catch (Throwable ignored) {
                 // Leave unsupported OEM row variants untouched.
             }
         }
-        // A row whose glass backdrop is composited by the OEM's blur pass still surfaces
-        // through the card in front of it, so clip the row in its own render space as well:
-        // the covered band is never rasterised and has nothing left to sample. The mask
-        // already covers the whole front card, so no extra seam is needed.
-        float seam = 0f;
         rows.sort(Comparator.comparingDouble(row -> row.top));
-        LinkedHashMap<View, Float> bands = new LinkedHashMap<>();
         for (int i = 1; i < rows.size(); i++) {
             RowPosition lower = rows.get(i);
             for (int j = 0; j < i; j++) {
                 RowPosition upper = rows.get(j);
-                if (upper.bottom + seam <= lower.top || upper.left >= lower.right
+                if (upper.bottom <= lower.top || upper.left >= lower.right
                         || upper.right <= lower.left) continue;
                 Path shape = new Path();
-                shape.addRoundRect(upper.left, upper.top, upper.right, upper.bottom + seam,
+                shape.addRoundRect(upper.left, upper.top, upper.right, upper.bottom,
                         upper.radius, upper.radius, Path.Direction.CW);
                 ArrayList<Path> masks = STACK_MASKS.get(lower.view);
                 if (masks == null) {
@@ -390,75 +371,24 @@ final class IosNotificationStackHooks {
                     STACK_MASKS.put(lower.view, masks);
                 }
                 masks.add(shape);
-                bands.merge(lower.view, upper.bottom + seam, (a, b) -> Math.max(a, b));
             }
         }
-        // A canvas clip only trims the recorded drawing, so it is kept for the rounded corners;
-        // the render-space clip above is what actually keeps the band out of the backdrop.
-        ArrayList<View> stale = new ArrayList<>();
-        for (View view : new ArrayList<>(STACK_CLIPS.keySet())) {
-            if (view == null || !bands.containsKey(view)) stale.add(view);
-        }
-        for (View view : stale) restoreRowClip(view);
-        if (CLIP_ROWS && !bands.isEmpty()) {
-            HashMap<View, RowPosition> positions = new HashMap<>();
-            for (RowPosition row : rows) positions.put(row.view, row);
-            for (Map.Entry<View, Float> entry : bands.entrySet()) {
-                RowPosition row = positions.get(entry.getKey());
-                if (row == null || row.scaleY <= 0f) continue;
-                int top = Math.round((entry.getValue() - row.top) / row.scaleY);
-                Rect original = STACK_CLIP_SAVED.get(row.view);
-                if (original != null) top = Math.max(top, original.top);
-                if (top <= 0) continue;
-                applyRowClip(row.view, new Rect(0, Math.min(top, row.view.getHeight()),
-                        row.view.getWidth(), row.view.getHeight()));
-            }
-        }
-        long now = android.os.SystemClock.uptimeMillis();
-        if (now - lastMaskLog >= 2000 && rows.size() >= 2) {
-            lastMaskLog = now;
-            StringBuilder geometry = new StringBuilder();
+        // The card in front has nothing covering it. Draw it a couple of pixels higher so the
+        // sliver its glass samples past the bottom edge lands on the wallpaper instead of on
+        // the card behind. This is the same nudge that made the bleed go away by hand, and it
+        // clips nothing, so every card keeps its rounded top.
+        LIFTED_ROWS.clear();
+        if (rows.size() >= 2) {
             for (RowPosition row : rows) {
-                ArrayList<Path> got = STACK_MASKS.get(row.view);
-                geometry.append('[').append(Integer.toHexString(System.identityHashCode(row.view)))
-                        .append(' ').append(Math.round(row.top)).append('~')
-                        .append(Math.round(row.bottom)).append(" m=")
-                        .append(got == null ? 0 : got.size())
-                        .append(" c=").append(STACK_CLIPS.containsKey(row.view) ? 1 : 0)
-                        .append(' ').append(row.detail)
-                        .append(']');
+                if (!STACK_MASKS.containsKey(row.view)) LIFTED_ROWS.put(row.view, Boolean.TRUE);
             }
-            Xp.log("[IOSShade] stack=" + Integer.toHexString(System.identityHashCode(group))
-                    + " rows=" + rows.size() + " masks=" + STACK_MASKS.size()
-                    + " seam=" + Math.round(seam) + " " + geometry);
-        }
-    }
-
-    private static void applyRowClip(View view, Rect rect) {
-        if (!STACK_CLIP_SAVED.containsKey(view)) {
-            Rect current = view.getClipBounds();
-            STACK_CLIP_SAVED.put(view, current == null ? null : new Rect(current));
-        }
-        Rect current = view.getClipBounds();
-        if (current != null && current.equals(rect)) return;
-        STACK_CLIPS.put(view, new Rect(rect));
-        view.setClipBounds(rect);
-    }
-
-    private static void restoreRowClip(View view) {
-        STACK_CLIPS.remove(view);
-        if (!STACK_CLIP_SAVED.containsKey(view)) return;
-        Rect original = STACK_CLIP_SAVED.remove(view);
-        try {
-            view.setClipBounds(original);
-        } catch (Throwable ignored) {
         }
     }
 
     static void restoreStackedRows() {
         maskedStack = null;
         STACK_MASKS.clear();
-        for (View view : new ArrayList<>(STACK_CLIPS.keySet())) restoreRowClip(view);
+        LIFTED_ROWS.clear();
     }
 
     static void restoreExpandedRows(View stack) {
@@ -628,28 +558,21 @@ final class IosNotificationStackHooks {
                     enforceUnstackedRow((View) chain.getArgs().get(1));
                     IosNotificationExitState.applyRow((View) chain.getArgs().get(1));
                 }
-                long clipNow = android.os.SystemClock.uptimeMillis();
-                if (chain.getThisObject() == maskedStack && chain.getArgs().size() >= 2
-                        && chain.getArgs().get(1) instanceof View) {
-                    ArrayList<Path> probe = STACK_MASKS.get((View) chain.getArgs().get(1));
-                    if (probe != null && !probe.isEmpty() && clipNow - lastClipLog >= 2000) {
-                        lastClipLog = clipNow;
-                        Xp.log("[IOSShade] clip stack="
-                                + Integer.toHexString(System.identityHashCode(chain.getThisObject()))
-                                + " child="
-                                + Integer.toHexString(System.identityHashCode(chain.getArgs().get(1)))
-                                + " masks=" + probe.size());
-                    }
-                }
                 if (chain.getThisObject() != maskedStack || chain.getArgs().size() < 2
                         || !(chain.getArgs().get(0) instanceof Canvas)
                         || !(chain.getArgs().get(1) instanceof View)) return chain.proceed();
-                ArrayList<Path> masks = STACK_MASKS.get((View) chain.getArgs().get(1));
-                if (masks == null || masks.isEmpty()) return chain.proceed();
+                View child = (View) chain.getArgs().get(1);
+                ArrayList<Path> masks = STACK_MASKS.get(child);
+                boolean lift = LIFTED_ROWS.containsKey(child);
+                if (!lift && (masks == null || masks.isEmpty())) return chain.proceed();
                 Canvas canvas = (Canvas) chain.getArgs().get(0);
                 int save = canvas.save();
                 try {
-                    for (Path mask : masks) canvas.clipOutPath(mask);
+                    if (lift) canvas.translate(0f, -FRONT_CARD_LIFT_DP
+                            * child.getResources().getDisplayMetrics().density);
+                    if (masks != null) {
+                        for (Path mask : masks) canvas.clipOutPath(mask);
+                    }
                     return chain.proceed();
                 } finally {
                     canvas.restoreToCount(save);
