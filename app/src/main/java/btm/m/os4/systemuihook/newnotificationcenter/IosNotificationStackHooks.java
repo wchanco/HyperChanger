@@ -360,12 +360,11 @@ final class IosNotificationStackHooks {
                 // Leave unsupported OEM row variants untouched.
             }
         }
-        // Soft glass samples a few pixels past its own edge, so two cards that merely touch
-        // still feed the lower card's top edge into the upper card's bottom band. Extend the
-        // mask by a hairline seam: at rest this leaves the strip empty, which is exactly what
-        // nudging the upper card up by a few pixels did by hand. Where the cards already
-        // overlap the extra strip was covered anyway, so nothing changes on screen.
-        float seam = 12f * group.getResources().getDisplayMetrics().density;
+        // A row whose glass backdrop is composited by the OEM's blur pass still surfaces
+        // through the card in front of it, so clip the row in its own render space as well:
+        // the covered band is never rasterised and has nothing left to sample. The mask
+        // already covers the whole front card, so no extra seam is needed.
+        float seam = 0f;
         rows.sort(Comparator.comparingDouble(row -> row.top));
         LinkedHashMap<View, Float> bands = new LinkedHashMap<>();
         for (int i = 1; i < rows.size(); i++) {
@@ -386,10 +385,8 @@ final class IosNotificationStackHooks {
                 bands.merge(lower.view, upper.bottom + seam, (a, b) -> Math.max(a, b));
             }
         }
-        // A canvas clip only trims the recorded drawing. A row whose glass backdrop is
-        // composited by the OEM's blur pass still surfaces through the card in front of it, so
-        // clip the row in its own render space as well: the covered band is never rasterised
-        // and has nothing left to sample.
+        // A canvas clip only trims the recorded drawing, so it is kept for the rounded corners;
+        // the render-space clip above is what actually keeps the band out of the backdrop.
         ArrayList<View> stale = new ArrayList<>();
         for (View view : new ArrayList<>(STACK_CLIPS.keySet())) {
             if (view == null || !bands.containsKey(view)) stale.add(view);
