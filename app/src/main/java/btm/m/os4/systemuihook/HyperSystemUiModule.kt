@@ -1107,6 +1107,11 @@ class HyperSystemUiModule : XposedModule() {
         if (param.packageName == LOCKSCREEN_WALLPAPER) {
             // HyperMusicCover's original Java WallpaperProbe is registered separately through
             // java_init.list and owns this process's GL upload hook.
+            runCatching {
+                WallpaperDimHooks.install(this, param.defaultClassLoader, getRemotePreferences(REMOTE_PREFERENCE_GROUP))
+            }.onFailure { error ->
+                btm.m.os4.systemuihook.HookModuleLogger.log(this, Log.WARN, TAG, "Could not install wallpaper dim hooks", error)
+            }
             return
         }
         if (param.packageName == XMSF_PACKAGE) {

@@ -561,6 +561,8 @@ private fun Root(
     var homeFolderSettings by remember { mutableStateOf(homeFolderStore.settings) }
     val homeMaterialStore = remember(context) { HomeMaterialSettingsStore(context) }
     var homeMaterialSettings by remember { mutableStateOf(homeMaterialStore.settings) }
+    val wallpaperDimStore = remember(context) { WallpaperDimSettingsStore(context) }
+    var wallpaperDimSettings by remember { mutableStateOf(wallpaperDimStore.settings) }
     val settingsAppStore = remember(context) { SettingsAppPreferencesStore(context) }
     val superXiaoAiStore = remember(context) { SuperXiaoAiPreferencesStore(context) }
     val systemUpdateStore = remember(context) { SystemUpdatePreferencesStore(context) }
@@ -909,6 +911,7 @@ private fun Root(
                 homeMultiSplitStore.syncRemote(it)
                 homeFolderStore.syncRemote(it)
                 homeMaterialStore.syncRemote(it)
+                wallpaperDimStore.syncRemote(it)
                 settingsAppStore.syncRemote(it)
                 superXiaoAiStore.syncRemote(it)
                 systemUpdateStore.syncRemote(it)
@@ -925,6 +928,7 @@ private fun Root(
                 homeMultiSplitSettings = homeMultiSplitStore.settings
                 homeFolderSettings = homeFolderStore.settings
                 homeMaterialSettings = homeMaterialStore.settings
+                wallpaperDimSettings = wallpaperDimStore.settings
                 settingsApp = settingsAppStore.settings
                 superXiaoAi = superXiaoAiStore.settings
                 systemUpdate = systemUpdateStore.settings
@@ -1025,6 +1029,13 @@ private fun Root(
                 dockStore.update(service, transform)
                 dockSettings = dockStore.settings
                 if (before != dockSettings) markRestartTargets(setOf(ScopeApplication.DESKTOP))
+            },
+            wallpaperDimSettings = wallpaperDimSettings,
+            updateWallpaperDim = { transform ->
+                if (wallpaperDimStore.update(service, transform)) {
+                    wallpaperDimSettings = wallpaperDimStore.settings
+                    markRestartTargets(setOf(ScopeApplication.WALLPAPER))
+                }
             },
             updateHomeRecents = { transform ->
                 val before = homeRecentsStore.settings
@@ -1226,6 +1237,8 @@ private fun Shell(
     homeFolderSettings: HomeFolderSettings,
     homeMaterialSettings: HomeMaterialSettings,
     service: XposedService?,
+    wallpaperDimSettings: WallpaperDimSettings = WallpaperDimSettings(),
+    updateWallpaperDim: ((WallpaperDimSettings) -> WallpaperDimSettings) -> Unit = {},
     settingsApp: SettingsAppPreferences,
     superXiaoAi: SuperXiaoAiPreferences,
     systemUpdate: SystemUpdatePreferences,
@@ -1398,6 +1411,7 @@ private fun Shell(
                 detailPage, settings, lockscreenCapsuleSettings, cameras, deviceProfile, appearance, musicWhitelist, dockSettings, homeRecentsSettings, homeFolderSettings, homeMaterialSettings, airDropSettings,
                 update, updateLockscreenCapsule, updateDock, updateHomeRecents, updateHomeFolder, updateHomeMaterial, updateCamera,
                 updateDeviceProfile, updateAppearance, updateMusicWhitelist, presetActions, updateAirDrop,
+                wallpaperDimSettings = wallpaperDimSettings, updateWallpaperDim = updateWallpaperDim,
                 settingsApp = settingsApp, updateSettingsApp = updateSettingsApp, superXiaoAi = superXiaoAi, updateSuperXiaoAi = updateSuperXiaoAi, systemUpdate = systemUpdate, updateSystemUpdate = updateSystemUpdate,
                 openPage = openNestedPage, back = dismissPage,
                 onDebugMode = { showDebug = true }, captcha = captcha,
@@ -3373,10 +3387,33 @@ private fun Desktop(
     updateHomeFolder: ((HomeFolderSettings) -> HomeFolderSettings) -> Unit,
     homeMaterialSettings: HomeMaterialSettings,
     updateHomeMaterial: ((HomeMaterialSettings) -> HomeMaterialSettings) -> Unit,
+    wallpaperDim: WallpaperDimSettings,
+    updateWallpaperDim: ((WallpaperDimSettings) -> WallpaperDimSettings) -> Unit,
     openPage: (PageId) -> Unit,
     back: () -> Unit,
 ) = AppPage(tr("桌面", "桌面"), back, restartScopes = setOf(ScopeApplication.DESKTOP)) { padding, scroll ->
     AppList(padding, scroll) {
+        item {
+            Group(tr("深色模式壁纸压暗", "深色模式壁纸压暗")) {
+                SwitchPreference(
+                    title = tr("深色模式压暗壁纸", "深色模式压暗壁纸"),
+                    summary = tr("仅深色模式生效，桌面与锁屏共用同一强度", "仅深色模式生效，桌面与锁屏共用同一强度"),
+                    checked = wallpaperDim.enabled,
+                    onCheckedChange = { enabled -> updateWallpaperDim { it.copy(enabled = enabled) } },
+                )
+                AnimatedVisibility(visible = wallpaperDim.enabled) {
+                    Column {
+                        ParameterIntSlide(
+                            tr("压暗强度", "压暗强度"),
+                            wallpaperDim.percent,
+                            WALLPAPER_DIM_MIN..WALLPAPER_DIM_MAX,
+                            "%",
+                            defaultValue = 40,
+                        ) { value -> updateWallpaperDim { it.copy(percent = value) } }
+                    }
+                }
+            }
+        }
         item {
             Group(tr("Dock 栏", "Dock 栏")) {
                 SwitchPreference(
@@ -4947,13 +4984,15 @@ private fun Detail(
     suggestedRestartTargets: Set<ScopeApplication>,
     onRestartedTargets: (Set<ScopeApplication>) -> Unit,
     openPage: (PageId) -> Unit,
-    back: () -> Unit
+    back: () -> Unit,
+    wallpaperDimSettings: WallpaperDimSettings = WallpaperDimSettings(),
+    updateWallpaperDim: ((WallpaperDimSettings) -> WallpaperDimSettings) -> Unit = {},
 ) {
     when (page) {
         PageId.MODULE_SAFETY -> ModuleSafetyPage({ openPage(PageId.MODULE_LOGS) }, back)
         PageId.MODULE_LOGS -> ModuleLogsPage(back)
         PageId.SHADE -> Shade(settings, update, presetActions, openPage, back)
-        PageId.DESKTOP -> Desktop(dockSettings, updateDock, homeRecentsSettings, updateHomeRecents, homeFolderSettings, updateHomeFolder, homeMaterialSettings, updateHomeMaterial, openPage, back)
+        PageId.DESKTOP -> Desktop(dockSettings, updateDock, homeRecentsSettings, updateHomeRecents, homeFolderSettings, updateHomeFolder, homeMaterialSettings, updateHomeMaterial, wallpaperDimSettings, updateWallpaperDim, openPage, back)
         PageId.DESKTOP_MATERIAL -> HomeMaterialPage(back)
         PageId.SHADE_PRESETS -> ShadePresets(settings, update, presetActions, back)
         PageId.SOFT_GLASS_PARAMETERS -> SoftGlassParametersPage(openPage, back)

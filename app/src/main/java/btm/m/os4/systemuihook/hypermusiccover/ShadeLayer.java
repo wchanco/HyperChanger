@@ -51,6 +51,9 @@ public final class ShadeLayer {
     private static volatile ViewGroup sRoot;
     private static volatile FrameLayout sFrame;
     private static volatile ImageView sWp;
+
+    /** Black cover over the wallpaper copy, so it carries the same dim as the real wallpaper. */
+    private static volatile View sDim;
     private static volatile Class<?> sPanelCls;
 
     /** Where {@link #sFrame} last landed, for the diagnostic line. */
@@ -275,9 +278,33 @@ public final class ShadeLayer {
             sLastWpBlur = blur;
         }
         applyCurtain(IOS.progress);
+        syncWallpaperDim();
         IosShadeMaterial.setActive(showWallpaper, sRoot);
         IosNotificationCenterPresentation.update(visual, IOS.progress, true, sFrame);
     }
+
+    /**
+     * The wallpaper behind the shade is a copy, so it does not inherit the dim the wallpaper
+     * process applies to the real one. Same switch, same strength, same night-only rule.
+     */
+    private static void syncWallpaperDim() {
+        final View dim = sDim;
+        if (dim == null) return;
+        float fraction = 0f;
+        final android.content.SharedPreferences prefs = sPreferences;
+        if (prefs != null && prefs.getBoolean(WALLPAPER_DIM_ENABLED, false)) {
+            final android.content.res.Configuration configuration = dim.getResources().getConfiguration();
+            if ((configuration.uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                    == android.content.res.Configuration.UI_MODE_NIGHT_YES) {
+                int percent = prefs.getInt(WALLPAPER_DIM_PERCENT, 40);
+                fraction = Math.max(0, Math.min(60, percent)) / 100f;
+            }
+        }
+        if (dim.getAlpha() != fraction) dim.setAlpha(fraction);
+    }
+
+    private static final String WALLPAPER_DIM_ENABLED = "wallpaper_dim_enabled";
+    private static final String WALLPAPER_DIM_PERCENT = "wallpaper_dim_percent";
 
     private static boolean isLandscapeFrame() {
         return sFrame != null && sFrame.getWidth() > 0 && sFrame.getHeight() > 0
@@ -508,6 +535,16 @@ public final class ShadeLayer {
 
             sFrame = frame;
             sWp = wp;
+            // Matches the wallpaper the wallpaper process drew: the same dark-mode dim, applied
+            // to this copy so the shade does not come up brighter than the desktop behind it.
+            final View dim = new View(ctx);
+            dim.setClickable(false);
+            dim.setFocusable(false);
+            dim.setBackgroundColor(android.graphics.Color.BLACK);
+            dim.setAlpha(0f);
+            frame.addView(dim, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            sDim = dim;
             frame.addOnLayoutChangeListener((view, left, top, right, bottom,
                     oldLeft, oldTop, oldRight, oldBottom) -> {
                 if (sFrame == view && sIosEnabled && IOS.progress > 0f
