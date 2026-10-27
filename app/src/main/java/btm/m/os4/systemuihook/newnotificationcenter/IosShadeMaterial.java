@@ -30,7 +30,6 @@ public final class IosShadeMaterial {
     private static final int[] RESTORE_ORDER = {3, 0, 1, 2, 4};
     private static final WeakHashMap<View, Object[]> SAVED = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> CONTAIN_REQUESTS = new WeakHashMap<>();
-    private static final WeakHashMap<View, Boolean> MEDIA = new WeakHashMap<>();
     private static final ThreadLocal<Boolean> WRITING = new ThreadLocal<>();
     private static boolean active;
     private static ViewGroup root;
@@ -159,28 +158,14 @@ public final class IosShadeMaterial {
     }
 
     private static boolean target(View view) {
-        String name = view.getClass().getName();
-        return isPanel(view) || name.endsWith(".NotificationBackgroundView")
-                || name.equals("com.miui.systemui.widget.CircleAndTickAnimView") || MEDIA.containsKey(view);
-    }
-
-    public static void registerMedia(View header) {
-        try {
-            Object holder = Xp.callMethod(header, "getMediaViewHolder");
-            if (holder == null) return;
-            Object background = Xp.getObjectField(holder, "mediaBg");
-            if (!(background instanceof View)) return;
-            View view = (View) background;
-            MEDIA.put(view, true);
-            if (active && view.getRootView() == root && !SAVED.containsKey(view)) apply(view);
-        } catch (Throwable ignored) {
-        }
+        // Native rows already have their MiView blur/glass material. Adding the legacy
+        // background-blur pass on top makes a stacked card sample its siblings as well as
+        // the wallpaper, so the lower card's text appears through the card above it.
+        return isPanel(view) || isDismissView(view);
     }
 
     private static void scan(View view) {
         if (view == clockRoot) scanClock(view);
-        if (view.getClass().getName().equals(
-                "com.android.systemui.statusbar.notification.mediacontrol.MiuiMediaHeaderView")) registerMedia(view);
         if (target(view) && view.isShown() && !SAVED.containsKey(view)) apply(view);
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;

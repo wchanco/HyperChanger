@@ -1,15 +1,12 @@
 package btm.m.os4.systemuihook.newnotificationcenter;
 
 import android.graphics.Canvas;
-import android.graphics.Path;
-import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.view.View;
 import android.view.ViewGroup;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -19,28 +16,8 @@ import btm.m.os4.systemuihook.hypermusiccover.Xp;
 
 /** Keeps focus/media cards expanded while retaining OEM stacking for ordinary notifications. */
 final class IosNotificationStackHooks {
-    private static final WeakHashMap<View, ArrayList<Path>> STACK_MASKS = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> SYSTEM_EXPANSION = new WeakHashMap<>();
-    private static ViewGroup maskedStack;
     private static Method resetGroupBackground;
-
-    private static final class RowPosition {
-        final View view;
-        final float left;
-        final float top;
-        final float right;
-        final float bottom;
-        final float radius;
-
-        RowPosition(View view, float left, float top, float right, float bottom, float radius) {
-            this.view = view;
-            this.left = left;
-            this.top = top;
-            this.right = right;
-            this.bottom = bottom;
-            this.radius = radius;
-        }
-    }
 
     private IosNotificationStackHooks() {}
 
@@ -308,75 +285,6 @@ final class IosNotificationStackHooks {
         }
     }
 
-    static void clipStackedRows(View stack, boolean active) {
-        if (!active || !(stack instanceof ViewGroup)) {
-            restoreStackedRows();
-            return;
-        }
-        ViewGroup group = (ViewGroup) stack;
-        maskedStack = group;
-        STACK_MASKS.clear();
-        ArrayList<RowPosition> rows = new ArrayList<>();
-        for (int i = 0; i < group.getChildCount(); i++) {
-            View child = group.getChildAt(i);
-            if (!child.isShown() || child.getWidth() <= 0
-                    || (!hasType(child, ".ExpandableNotificationRow")
-                    && !hasType(child, ".MiuiMediaHeaderView"))) continue;
-            if (isFocusOrMediaNotification(child)) continue;
-            try {
-                int height = ((Number) Xp.callMethod(child, "getActualHeight")).intValue();
-                float scaleX = ((Number) Xp.callMethod(child, "getSuperScaleX")).floatValue();
-                float scaleY = ((Number) Xp.callMethod(child, "getSuperScaleY")).floatValue();
-                float alpha = ((Number) Xp.callMethod(child, "getSuperAlpha")).floatValue();
-                if (height <= 0 || scaleX <= 0f || scaleY <= 0f || alpha <= 0f) continue;
-                Rect bounds = child.getClipBounds();
-                int clipBottom = ((Number) Xp.callMethod(child, "getClipBottomAmount")).intValue();
-                int stackBottom = ((Number) Xp.callMethod(child, "getExtClipBottomAmount")).intValue();
-                int bottom = height - Math.max(clipBottom, stackBottom);
-                if (bounds != null) bottom = Math.min(bottom, bounds.bottom);
-                // Window coordinates round each translated card independently. Local float
-                // coordinates keep the mask fixed to its card during fractional sheet motion.
-                float left = child.getLeft()
-                        + ((Number) Xp.callMethod(child, "getSuperTranslationX")).floatValue()
-                        + child.getPivotX() * (1f - scaleX);
-                float top = child.getTop()
-                        + ((Number) Xp.callMethod(child, "getSuperTranslationY")).floatValue()
-                        + child.getPivotY() * (1f - scaleY);
-                int clipTop = ((Number) Xp.callMethod(child, "getClipTopAmount")).intValue();
-                if (bounds != null) clipTop = Math.max(clipTop, bounds.top);
-                float radius = ((Number) Xp.callMethod(child, "getBgRadius")).floatValue()
-                        * Math.min(scaleX, scaleY);
-                rows.add(new RowPosition(child, left, top + clipTop * scaleY, left + child.getWidth() * scaleX,
-                        top + Math.max(0, bottom) * scaleY, radius));
-            } catch (Throwable ignored) {
-                // Leave unsupported OEM row variants untouched.
-            }
-        }
-        rows.sort(Comparator.comparingDouble(row -> row.top));
-        for (int i = 1; i < rows.size(); i++) {
-            RowPosition lower = rows.get(i);
-            for (int j = 0; j < i; j++) {
-                RowPosition upper = rows.get(j);
-                if (upper.bottom <= lower.top || upper.left >= lower.right
-                        || upper.right <= lower.left) continue;
-                Path shape = new Path();
-                shape.addRoundRect(upper.left, upper.top, upper.right, upper.bottom,
-                        upper.radius, upper.radius, Path.Direction.CW);
-                ArrayList<Path> masks = STACK_MASKS.get(lower.view);
-                if (masks == null) {
-                    masks = new ArrayList<>();
-                    STACK_MASKS.put(lower.view, masks);
-                }
-                masks.add(shape);
-            }
-        }
-    }
-
-    static void restoreStackedRows() {
-        maskedStack = null;
-        STACK_MASKS.clear();
-    }
-
     static void restoreExpandedRows(View stack) {
         for (View row : new ArrayList<>(SYSTEM_EXPANSION.keySet())) {
             try {
@@ -519,18 +427,20 @@ final class IosNotificationStackHooks {
                 // visibility first, including notifications inside expanded groups.
                 enforceUnstackedRows((View) chain.getThisObject());
                 View view = (View) chain.getThisObject();
+                // The presentation needs the live stack instance for ownership and layout.
+                // Capture it at the last point before the native draw begins.
+                IosNotificationCenterPresentation.captureStack(view);
                 IosNotificationExitState.apply(view);
                 if (!IosNotificationCenterPresentation.ownsStack(view)
                         || chain.getArgs().isEmpty() || !(chain.getArgs().get(0) instanceof Canvas)) {
                     return chain.proceed();
                 }
                 IosNotificationExitState.rememberFrame(view);
-                clipStackedRows(view, true);
                 Canvas canvas = (Canvas) chain.getArgs().get(0);
                 int save = canvas.save();
                 try (LayoutInputs foregroundBlur = new LayoutInputs(view)) {
-                    // The sheet already blurs the entire list. The OEM pass switches to a
-                    // second RenderNode and redraws heads-up rows separately during collapse.
+                    // Cards keep their own glass but must not let the card below read through:
+                    // the stack's foreground blur is what makes a card a blur of its backdrop.
                     foregroundBlur.set("mBlurEffect", null);
                     canvas.clipRect(0f, 0f, view.getWidth(),
                             IosNotificationCenterPresentation.viewportBottom(view));
@@ -544,22 +454,10 @@ final class IosNotificationStackHooks {
                     enforceUnstackedRow((View) chain.getArgs().get(1));
                     IosNotificationExitState.applyRow((View) chain.getArgs().get(1));
                 }
-                if (chain.getThisObject() != maskedStack || chain.getArgs().size() < 2
-                        || !(chain.getArgs().get(0) instanceof Canvas)
-                        || !(chain.getArgs().get(1) instanceof View)) return chain.proceed();
-                ArrayList<Path> masks = STACK_MASKS.get((View) chain.getArgs().get(1));
-                if (masks == null || masks.isEmpty()) return chain.proceed();
-                Canvas canvas = (Canvas) chain.getArgs().get(0);
-                int save = canvas.save();
-                try {
-                    for (Path mask : masks) canvas.clipOutPath(mask);
-                    return chain.proceed();
-                } finally {
-                    canvas.restoreToCount(save);
-                }
+                return chain.proceed();
             });
         } catch (Throwable error) {
-            Xp.log("[IOSShade] notification stack mask unavailable: " + error);
+            Xp.log("[IOSShade] notification stack draw hooks unavailable: " + error);
         }
         try {
             Class<?> algorithm = Xp.findClass(

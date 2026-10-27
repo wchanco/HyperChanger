@@ -188,7 +188,6 @@ public final class IosNotificationCenterPresentation {
             } else {
                 restoreStackTransform();
             }
-            IosNotificationStackHooks.restoreStackedRows();
             if (previousProgress > 0f) IosNotificationStackHooks.restoreExpandedRows(stack);
             // Only retain an already-owned header at the exit endpoint. A reset before
             // the first presentation must not acquire and hide the native header.
@@ -1649,7 +1648,6 @@ public final class IosNotificationCenterPresentation {
         IosNotificationExitState.clear();
         restoreStackTransform();
         restoreLandscapeStackLayout();
-        IosNotificationStackHooks.restoreStackedRows();
         IosNotificationStackHooks.restoreExpandedRows(stack);
         if (observer != null && observer.isAlive()) observer.removeOnPreDrawListener(FRAME);
         observer = null;
