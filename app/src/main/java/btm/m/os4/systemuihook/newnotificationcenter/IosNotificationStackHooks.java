@@ -1,6 +1,7 @@
 package btm.m.os4.systemuihook.newnotificationcenter;
 
 import android.graphics.Canvas;
+import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.view.View;
 import android.view.ViewGroup;
@@ -17,7 +18,26 @@ import btm.m.os4.systemuihook.hypermusiccover.Xp;
 /** Keeps focus/media cards expanded while retaining OEM stacking for ordinary notifications. */
 final class IosNotificationStackHooks {
     private static final WeakHashMap<View, Boolean> SYSTEM_EXPANSION = new WeakHashMap<>();
+    private static final WeakHashMap<View, Rect> STACK_CLIPS = new WeakHashMap<>();
     private static Method resetGroupBackground;
+
+    private static final class RowPosition {
+        final View view;
+        final float left;
+        final float top;
+        final float right;
+        final float bottom;
+        final float scaleY;
+
+        RowPosition(View view, float left, float top, float right, float bottom, float scaleY) {
+            this.view = view;
+            this.left = left;
+            this.top = top;
+            this.right = right;
+            this.bottom = bottom;
+            this.scaleY = scaleY;
+        }
+    }
 
     private IosNotificationStackHooks() {}
 
@@ -285,6 +305,108 @@ final class IosNotificationStackHooks {
         }
     }
 
+    /**
+     * Cut each lower card at the bottom edge of the cards above it. The glass is translucent
+     * over its backdrop, so drawing a covered lower card feeds its text into the upper card.
+     * The clip is compared with the real value every frame because the OEM writes its own
+     * clip during property composition, after this pass.
+     *
+     * Which card covers which is decided by the child order, not by the current y: during a
+     * fast collapse the rows spring independently and two of them cross for a few frames, and
+     * sorting by the instantaneous position would then clip the second card away and expose
+     * the third one whole.
+     */
+    static void clipStackedRows(View stack) {
+        if (!(stack instanceof ViewGroup)) {
+            restoreStackedRows();
+            return;
+        }
+        ViewGroup group = (ViewGroup) stack;
+        ArrayList<RowPosition> rows = new ArrayList<>();
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (!child.isShown() || child.getWidth() <= 0 || !isNotificationRow(child)) continue;
+            try {
+                int height = ((Number) Xp.callMethod(child, "getActualHeight")).intValue();
+                float scaleX = ((Number) Xp.callMethod(child, "getSuperScaleX")).floatValue();
+                float scaleY = ((Number) Xp.callMethod(child, "getSuperScaleY")).floatValue();
+                float translationX =
+                        ((Number) Xp.callMethod(child, "getSuperTranslationX")).floatValue();
+                float translationY =
+                        ((Number) Xp.callMethod(child, "getSuperTranslationY")).floatValue();
+                float alpha = ((Number) Xp.callMethod(child, "getSuperAlpha")).floatValue();
+                if (scaleX <= 0f || scaleY <= 0f || alpha <= 0f) continue;
+                Rect bounds = child.getClipBounds();
+                int clipBottom = ((Number) Xp.callMethod(child, "getClipBottomAmount")).intValue();
+                int stackBottom =
+                        ((Number) Xp.callMethod(child, "getExtClipBottomAmount")).intValue();
+                int bottom = height - Math.max(clipBottom, stackBottom);
+                if (bounds != null) bottom = Math.min(bottom, bounds.bottom);
+                float left = child.getLeft() + translationX
+                        + child.getPivotX() * (1f - scaleX);
+                float top = child.getTop() + translationY
+                        + child.getPivotY() * (1f - scaleY);
+                rows.add(new RowPosition(child,
+                        left,
+                        top,
+                        left + child.getWidth() * scaleX,
+                        top + Math.max(0, bottom) * scaleY,
+                        scaleY));
+            } catch (Throwable ignored) {
+            }
+        }
+        Map<View, Rect> wanted = new java.util.IdentityHashMap<>();
+        for (int i = 1; i < rows.size(); i++) {
+            RowPosition lower = rows.get(i);
+            float coveredFrom = Float.NaN;
+            for (int j = 0; j < i; j++) {
+                RowPosition upper = rows.get(j);
+                if (upper.bottom <= lower.top || upper.left >= lower.right
+                        || upper.right <= lower.left) continue;
+                coveredFrom = Float.isNaN(coveredFrom)
+                        ? upper.bottom : Math.max(coveredFrom, upper.bottom);
+            }
+            if (Float.isNaN(coveredFrom)) continue;
+            int height = lower.view.getHeight();
+            try {
+                height = ((Number) Xp.callMethod(lower.view, "getActualHeight")).intValue();
+            } catch (Throwable ignored) {
+            }
+            int clipTop = Math.max(0,
+                    Math.round((coveredFrom - lower.top) / lower.scaleY));
+            wanted.put(lower.view,
+                    new Rect(0, Math.min(clipTop, height), lower.view.getWidth(), height));
+        }
+        for (View view : new ArrayList<>(STACK_CLIPS.keySet())) {
+            if (wanted.containsKey(view)) continue;
+            try {
+                view.setClipBounds(null);
+            } catch (Throwable ignored) {
+            }
+            STACK_CLIPS.remove(view);
+        }
+        for (Map.Entry<View, Rect> entry : wanted.entrySet()) {
+            View view = entry.getKey();
+            Rect target = entry.getValue();
+            if (target.equals(STACK_CLIPS.get(view)) && target.equals(view.getClipBounds())) continue;
+            try {
+                view.setClipBounds(target);
+                STACK_CLIPS.put(view, target);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    static void restoreStackedRows() {
+        for (View view : new ArrayList<>(STACK_CLIPS.keySet())) {
+            try {
+                view.setClipBounds(null);
+            } catch (Throwable ignored) {
+            }
+        }
+        STACK_CLIPS.clear();
+    }
+
     static void restoreExpandedRows(View stack) {
         for (View row : new ArrayList<>(SYSTEM_EXPANSION.keySet())) {
             try {
@@ -436,6 +558,7 @@ final class IosNotificationStackHooks {
                     return chain.proceed();
                 }
                 IosNotificationExitState.rememberFrame(view);
+                clipStackedRows(view);
                 Canvas canvas = (Canvas) chain.getArgs().get(0);
                 int save = canvas.save();
                 try (LayoutInputs foregroundBlur = new LayoutInputs(view)) {

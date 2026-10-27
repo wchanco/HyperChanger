@@ -279,6 +279,7 @@ public final class ShadeLayer {
         }
         applyCurtain(IOS.progress);
         syncWallpaperDim();
+        IosShadeMaterial.setBlurSource(sFrame);
         IosShadeMaterial.setActive(showWallpaper, sRoot);
         IosNotificationCenterPresentation.update(visual, IOS.progress, true, sFrame);
     }

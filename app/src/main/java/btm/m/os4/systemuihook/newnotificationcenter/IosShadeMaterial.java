@@ -30,10 +30,16 @@ public final class IosShadeMaterial {
     private static final int[] RESTORE_ORDER = {3, 0, 1, 2, 4};
     private static final WeakHashMap<View, Object[]> SAVED = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> CONTAIN_REQUESTS = new WeakHashMap<>();
+    private static final WeakHashMap<View, View> BLUR_CONTAINERS = new WeakHashMap<>();
+    private static final WeakHashMap<View, Boolean> MEDIA = new WeakHashMap<>();
     private static final ThreadLocal<Boolean> WRITING = new ThreadLocal<>();
     private static boolean active;
     private static ViewGroup root;
     private static View clockRoot;
+    private static View blurSource;
+    private static Method chooseBlurContainer;
+    private static Method readBlurContainer;
+    private static boolean loggedBlurContainerFailure;
     private static ViewTreeObserver observer;
     private static boolean loggedFailure;
     private static final ViewTreeObserver.OnGlobalLayoutListener LAYOUT = () -> {
@@ -88,12 +94,27 @@ public final class IosShadeMaterial {
                     .intercept(chain -> {
                         Object result = chain.proceed();
                         View view = (View) chain.getThisObject();
-                        if (active && !Boolean.TRUE.equals(WRITING.get()) && !SAVED.containsKey(view) && target(view)
-                                && view.getRootView() == root) apply(view);
+                        if (active && !Boolean.TRUE.equals(WRITING.get())
+                                && view.getRootView() == root) {
+                            bindRowBackground(view);
+                            if (!SAVED.containsKey(view) && target(view)) apply(view);
+                        }
                         return result;
                     });
         } catch (Throwable error) {
             Xp.log("[IOSShade] row material refresh hook unavailable: " + error);
+        }
+        // A native card samples its window backdrop unless a container is supplied. The shade
+        // wallpaper is a sibling below the panel, so point the card's background blur at its
+        // RenderNode; that keeps the glass on the wallpaper instead of Chrome or the launcher.
+        try {
+            chooseBlurContainer = View.class.getDeclaredMethod(
+                    "chooseBackgroundBlurContainer", View.class);
+            chooseBlurContainer.setAccessible(true);
+            readBlurContainer = View.class.getDeclaredMethod("getBackGroundBlurContainer");
+            readBlurContainer.setAccessible(true);
+        } catch (Throwable error) {
+            Xp.log("[IOSShade] background blur container API unavailable: " + error);
         }
     }
 
@@ -106,6 +127,14 @@ public final class IosShadeMaterial {
         observer = window.getViewTreeObserver();
         observer.addOnGlobalLayoutListener(LAYOUT);
         scan(window);
+    }
+
+    /** The wallpaper view the notification cards must sample instead of the app behind the shade. */
+    public static void setBlurSource(View view) {
+        if (blurSource == view) return;
+        clearBlurContainers();
+        blurSource = view;
+        if (active && root != null) scan(root);
     }
 
     public static void registerClock(View view) {
@@ -158,14 +187,65 @@ public final class IosShadeMaterial {
     }
 
     private static boolean target(View view) {
-        // Native rows already have their MiView blur/glass material. Adding the legacy
-        // background-blur pass on top makes a stacked card sample its siblings as well as
-        // the wallpaper, so the lower card's text appears through the card above it.
-        return isPanel(view) || isDismissView(view);
+        // Rows need their local background pass to sample the shade wallpaper. The container
+        // chosen in bindRowBackground() bounds that pass to the wallpaper RenderNode, while
+        // clipStackedRows() removes the covered part of any lower card from the composite.
+        return isPanel(view) || isDismissView(view) || isRowBackground(view);
+    }
+
+    private static boolean isRowBackground(View view) {
+        return MEDIA.containsKey(view)
+                || view.getClass().getName().endsWith(".NotificationBackgroundView");
+    }
+
+    public static void registerMedia(View header) {
+        try {
+            Object holder = Xp.callMethod(header, "getMediaViewHolder");
+            if (holder == null) return;
+            Object background = Xp.getObjectField(holder, "mediaBg");
+            if (!(background instanceof View)) return;
+            View view = (View) background;
+            MEDIA.put(view, true);
+            if (!active || root == null || view.getRootView() != root) return;
+            bindRowBackground(view);
+            if (!SAVED.containsKey(view)) apply(view);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void bindRowBackground(View view) {
+        if (!active || root == null || blurSource == null || chooseBlurContainer == null
+                || !isRowBackground(view) || view.getRootView() != root) return;
+        try {
+            Object current = readBlurContainer.invoke(view);
+            if (current == blurSource) return;
+            if (!BLUR_CONTAINERS.containsKey(view)) {
+                BLUR_CONTAINERS.put(view, current instanceof View ? (View) current : null);
+            }
+            chooseBlurContainer.invoke(view, blurSource);
+        } catch (Throwable error) {
+            if (!loggedBlurContainerFailure) {
+                loggedBlurContainerFailure = true;
+                Xp.log("[IOSShade] background blur container failed: " + error);
+            }
+        }
+    }
+
+    private static void clearBlurContainers() {
+        if (chooseBlurContainer != null) {
+            for (Map.Entry<View, View> entry : new ArrayList<>(BLUR_CONTAINERS.entrySet())) {
+                try {
+                    chooseBlurContainer.invoke(entry.getKey(), entry.getValue());
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        BLUR_CONTAINERS.clear();
     }
 
     private static void scan(View view) {
         if (view == clockRoot) scanClock(view);
+        bindRowBackground(view);
         if (target(view) && view.isShown() && !SAVED.containsKey(view)) apply(view);
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
@@ -236,6 +316,8 @@ public final class IosShadeMaterial {
     private static void restore() {
         active = false;
         clockRoot = null;
+        clearBlurContainers();
+        blurSource = null;
         if (observer != null && observer.isAlive()) observer.removeOnGlobalLayoutListener(LAYOUT);
         observer = null;
         WRITING.set(true);

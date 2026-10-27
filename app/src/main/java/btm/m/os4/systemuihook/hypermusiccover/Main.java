@@ -760,6 +760,18 @@ public class Main extends XposedModule {
                 !btm.m.os4.systemuihook.ModuleSafetyRuntime.allows(btm.m.os4.systemuihook.SafetySection.NOTIFICATIONS)) return;
 
         IosShadeMaterial.install();
+        try {
+            Class<?> glass = Xp.findClass(
+                    "com.android.systemui.statusbar.notification.style.vieweffect.MediaViewGlassEffect", param.getDefaultClassLoader());
+            Xp.hookAll(glass, "apply", chain -> {
+                // Enroll before the native recipe so its wallpaper sampling is active as well.
+                if (!chain.getArgs().isEmpty() && chain.getArgs().get(0) instanceof View)
+                    IosShadeMaterial.registerMedia((View) chain.getArgs().get(0));
+                return chain.proceed();
+            });
+        } catch (Throwable error) {
+            Xp.log("[IOSShade] media glass hook unavailable: " + error);
+        }
 
         try {
             ShadeLayer.bindPreferences(getRemotePreferences("hyper_system_ui_hook"));
