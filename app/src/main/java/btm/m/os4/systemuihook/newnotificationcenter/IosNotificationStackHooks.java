@@ -21,6 +21,62 @@ final class IosNotificationStackHooks {
     private static final WeakHashMap<View, Rect> STACK_CLIPS = new WeakHashMap<>();
     private static Method resetGroupBackground;
 
+    /** Temporary end-of-list trace, armed by the module's debug broadcast. */
+    private static volatile boolean scrollDumpArmed;
+
+    public static void armScrollDump() {
+        scrollDumpArmed = true;
+    }
+
+    public static void dumpScrollState(View stack) {
+        if (!(stack instanceof ViewGroup)) return;
+        try {
+            ViewGroup group = (ViewGroup) stack;
+            Object ambient = Xp.getObjectField(stack, "mAmbientState");
+            int range = -1;
+            try {
+                Object value = Xp.callMethod(stack, "getScrollRange");
+                if (value instanceof Number) range = ((Number) value).intValue();
+            } catch (Throwable ignored) {
+            }
+            int ownScroll = -1;
+            try {
+                Object value = Xp.callMethod(stack, "getOwnScrollY");
+                if (value instanceof Number) ownScroll = ((Number) value).intValue();
+            } catch (Throwable ignored) {
+            }
+            Xp.log("[IOSShade] scroll range=" + range + " own=" + ownScroll
+                    + " scrollY=" + group.getScrollY() + " height=" + group.getHeight()
+                    + " topPadding=" + Xp.callMethod(stack, "getTopPadding")
+                    + " content=" + Xp.getObjectField(stack, "mContentHeight")
+                    + " ambientY=" + Xp.getObjectField(ambient, "mStackY")
+                    + " ambientH=" + Xp.getObjectField(ambient, "mStackHeight")
+                    + " ambientEnd=" + Xp.getObjectField(ambient, "mStackEndHeight")
+                    + " clampTop=" + Xp.getObjectField(stack, "mMaxLayoutHeight")
+                    + " extra=" + IosNotificationCenterPresentation.extraScrollRange(stack)
+                    + " offset=" + IosNotificationCenterPresentation.stackOffset(stack,
+                            ((Number) Xp.callMethod(stack, "getTopPadding")).floatValue()));
+            for (int i = Math.max(0, group.getChildCount() - 4); i < group.getChildCount(); i++) {
+                View row = group.getChildAt(i);
+                if (!isNotificationRow(row)) continue;
+                StringBuilder line = new StringBuilder("scroll row " + i + " v=" + row.getVisibility()
+                        + " sh=" + (row.isShown() ? 1 : 0)
+                        + " top=" + row.getTop() + " bottom=" + row.getBottom())
+                        .append(" actual=").append(Xp.callMethod(row, "getActualHeight"))
+                        .append(" intrinsic=").append(Xp.callMethod(row, "getIntrinsicHeight"))
+                        .append(" superTy=").append(Xp.callMethod(row, "getSuperTranslationY"))
+                        .append(" superSy=").append(Xp.callMethod(row, "getSuperScaleY"))
+                        .append(" clip=").append(row.getClipBounds())
+                        .append(" stateY=").append(Xp.getObjectField(Xp.callMethod(row, "getViewState"), "mYTranslation"))
+                        .append(" stateH=").append(Xp.getObjectField(Xp.callMethod(row, "getViewState"), "height"))
+                        .append(" hidden=").append(Xp.getObjectField(Xp.callMethod(row, "getViewState"), "hidden"));
+                Xp.log("[IOSShade] " + line);
+            }
+        } catch (Throwable error) {
+            Xp.log("[IOSShade] scroll dump failed: " + error);
+        }
+    }
+
     private static final class RowPosition {
         final View view;
         final float left;
@@ -558,6 +614,10 @@ final class IosNotificationStackHooks {
                     return chain.proceed();
                 }
                 IosNotificationExitState.rememberFrame(view);
+                if (scrollDumpArmed) {
+                    scrollDumpArmed = false;
+                    dumpScrollState(view);
+                }
                 clipStackedRows(view);
                 Canvas canvas = (Canvas) chain.getArgs().get(0);
                 int save = canvas.save();

@@ -2029,6 +2029,8 @@ public class Main extends XposedModule {
                         dumpCandidates();
                     } else if ("blurscan".equals(op)) {
                         dumpBlurScan();
+                    } else if ("scrolldump".equals(op)) {
+                        btm.m.os4.systemuihook.newnotificationcenter.IosShadeMaterial.armScrollDump();
                     } else if ("blurclear".equals(op)) {
                         clearCardBlur();
                     } else if ("shade".equals(op)) {

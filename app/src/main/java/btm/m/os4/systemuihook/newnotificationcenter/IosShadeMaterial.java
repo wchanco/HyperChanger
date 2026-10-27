@@ -137,6 +137,10 @@ public final class IosShadeMaterial {
         if (active && root != null) scan(root);
     }
 
+    public static void armScrollDump() {
+        IosNotificationStackHooks.armScrollDump();
+    }
+
     public static void registerClock(View view) {
         clockRoot = view;
         if (active && view != null) scanClock(view);
