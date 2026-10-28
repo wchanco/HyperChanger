@@ -53,7 +53,7 @@ final class IosNotificationStackHooks {
                     + " ambientH=" + Xp.getObjectField(ambient, "mStackHeight")
                     + " ambientEnd=" + Xp.getObjectField(ambient, "mStackEndHeight")
                     + " clampTop=" + Xp.getObjectField(stack, "mMaxLayoutHeight")
-                    + " extra=" + IosNotificationCenterPresentation.extraScrollRange(stack)
+                    + " required=" + IosNotificationCenterPresentation.requiredScrollRange(stack)
                     + " offset=" + IosNotificationCenterPresentation.stackOffset(stack,
                             ((Number) Xp.callMethod(stack, "getTopPadding")).floatValue()));
             for (int i = Math.max(0, group.getChildCount() - 4); i < group.getChildCount(); i++) {
@@ -574,8 +574,9 @@ final class IosNotificationStackHooks {
                 if (!(chain.getThisObject() instanceof android.view.View) || !(result instanceof Number)) {
                     return result;
                 }
-                return ((Number) result).intValue() + IosNotificationCenterPresentation.extraScrollRange(
-                        (android.view.View) chain.getThisObject());
+                android.view.View view = (android.view.View) chain.getThisObject();
+                return Math.max(((Number) result).intValue(),
+                        IosNotificationCenterPresentation.requiredScrollRange(view));
             });
             Xp.hookAll(stack, "setAlpha", chain -> {
                 Object[] args = chain.getArgs().toArray();

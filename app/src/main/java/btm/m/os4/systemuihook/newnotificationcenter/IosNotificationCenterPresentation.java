@@ -508,10 +508,7 @@ public final class IosNotificationCenterPresentation {
 
     /** Stable local viewport; native container bounds shrink ahead of the hosted exit. */
     static float viewportBottom(View view) {
-        float inset = 16f * view.getResources().getDisplayMetrics().density;
-        WindowInsets insets = view.getRootWindowInsets();
-        if (insets != null) inset = Math.max(inset,
-                insets.getInsetsIgnoringVisibility(WindowInsets.Type.navigationBars()).bottom);
+        float inset = navigationInset(view);
         // Shift the resting boundary as well as the origin so the OEM stacking calculator
         // and special media/focus rows use the same bottom, instead of cancelling the offset.
         int offsetDp = notificationShortcutsEnabled && !isLandscapePanel()
@@ -543,18 +540,37 @@ public final class IosNotificationCenterPresentation {
         return host.getAlpha();
     }
 
-    static int extraScrollRange(View view) {
-        float clearance = stackClearance(view);
-        if (clearance <= .5f) return 0;
+    /**
+     * How far the list must be able to scroll so the final card can leave the stack zone.
+     *
+     * The rows are laid out from {@code nativeTop + stackOffset}, so the content's real bottom
+     * is that origin plus the content height. The OEM range is measured from its own origin and
+     * therefore falls short by the offset; compensating only for {@code clearance} still leaves
+     * a gap, which is why the last card could never be pulled out from under the one above it.
+     */
+    static int requiredScrollRange(View view) {
+        if (!isActive() || view != stack) return 0;
         try {
             float contentHeight = ((Number) Xp.getObjectField(view, "mContentHeight")).floatValue();
-            float bottom = viewportBottom(view);
-            float addedOverflow = Math.max(0f, contentHeight + clearance - bottom)
-                    - Math.max(0f, contentHeight - bottom);
-            return Math.max(0, (int) Math.ceil(Math.min(clearance, addedOverflow)));
+            if (contentHeight <= 0f) return 0;
+            float nativeTop = ((Number) Xp.callMethod(view, "getTopPadding")).floatValue();
+            float top = nativeTop + stackOffset(view, nativeTop);
+            // Only the navigation bar is off-limits here. The resting boundary also reserves the
+            // user's bottom offset and the shortcut row; adding those to the range would stop
+            // the last card hundreds of pixels above the screen edge and leave a blank strip.
+            float bottom = view.getHeight() - navigationInset(view);
+            return Math.max(0, (int) Math.ceil(contentHeight + top - bottom));
         } catch (Throwable ignored) {
-            return Math.max(0, (int) Math.ceil(clearance));
+            return 0;
         }
+    }
+
+    private static float navigationInset(View view) {
+        float inset = 16f * view.getResources().getDisplayMetrics().density;
+        WindowInsets insets = view.getRootWindowInsets();
+        if (insets != null) inset = Math.max(inset,
+                insets.getInsetsIgnoringVisibility(WindowInsets.Type.navigationBars()).bottom);
+        return inset;
     }
 
     private static float stackClearance(View view) {
